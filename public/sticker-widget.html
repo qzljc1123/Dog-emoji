@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dog sticker</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+      }
+      body {
+        width: 100%;
+        min-height: 1px;
+        display: flex;
+        align-items: flex-start;
+        justify-content: flex-start;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      #sticker {
+        display: none;
+        max-width: min(280px, 100%);
+        max-height: 280px;
+        width: auto;
+        height: auto;
+        object-fit: contain;
+        border-radius: 12px;
+      }
+      #fallback {
+        display: none;
+        max-width: 280px;
+        padding: 10px 12px;
+        border-radius: 12px;
+        background: rgba(127, 127, 127, 0.12);
+        font-size: 14px;
+        line-height: 1.4;
+      }
+    </style>
+  </head>
+  <body>
+    <img id="sticker" alt="" />
+    <div id="fallback"></div>
+
+    <script type="module">
+      const imageEl = document.querySelector("#sticker");
+      const fallbackEl = document.querySelector("#fallback");
+
+      function normalizeSticker(value) {
+        if (!value || typeof value !== "object") return null;
+        if (!value.id || !value.name || !value.imageUrl) return null;
+        return {
+          id: String(value.id),
+          name: String(value.name),
+          labels: Array.isArray(value.labels) ? value.labels.map(String) : [],
+          imageUrl: String(value.imageUrl),
+        };
+      }
+
+      function fromWidgetState() {
+        const state = window.openai?.widgetState;
+        return normalizeSticker(
+          state?.sticker ?? state?.privateContent?.sticker ?? state
+        );
+      }
+
+      function fromChatGPTToolOutput() {
+        return normalizeSticker(window.openai?.toolOutput);
+      }
+
+      function persist(sticker) {
+        if (!sticker || !window.openai?.setWidgetState) return;
+        window.openai.setWidgetState({ sticker });
+      }
+
+      function render(sticker) {
+        if (!sticker) return;
+        imageEl.alt = sticker.name;
+        imageEl.title = sticker.name;
+        fallbackEl.textContent = sticker.name;
+        fallbackEl.style.display = "none";
+        imageEl.style.display = "block";
+        imageEl.src = sticker.imageUrl;
+        persist(sticker);
+      }
+
+      imageEl.addEventListener("error", () => {
+        imageEl.style.display = "none";
+        fallbackEl.style.display = "block";
+      });
+
+      // ChatGPT compatibility path: restores persisted state on refresh.
+      render(fromChatGPTToolOutput() ?? fromWidgetState());
+
+      // MCP Apps standard bridge.
+      let rpcId = 0;
+      const pending = new Map();
+
+      function rpcNotify(method, params) {
+        window.parent.postMessage(
+          { jsonrpc: "2.0", method, params },
+          "*"
+        );
+      }
+
+      function rpcRequest(method, params) {
+        return new Promise((resolve, reject) => {
+          const id = ++rpcId;
+          pending.set(id, { resolve, reject });
+          window.parent.postMessage(
+            { jsonrpc: "2.0", id, method, params },
+            "*"
+          );
+        });
+      }
+
+      window.addEventListener(
+        "message",
+        (event) => {
+          if (event.source !== window.parent) return;
+          const message = event.data;
+          if (!message || message.jsonrpc !== "2.0") return;
+
+          if (typeof message.id === "number") {
+            const request = pending.get(message.id);
+            if (!request) return;
+            pending.delete(message.id);
+            if (message.error) request.reject(message.error);
+            else request.resolve(message.result);
+            return;
+          }
+
+          if (message.method === "ui/notifications/tool-result") {
+            const sticker = normalizeSticker(
+              message.params?.structuredContent
+            );
+            render(sticker);
+          }
+        },
+        { passive: true }
+      );
+
+      async function initializeBridge() {
+        try {
+          await rpcRequest("ui/initialize", {
+            appInfo: {
+              name: "dog-sticker-widget",
+              version: "0.1.0",
+            },
+            appCapabilities: {},
+            protocolVersion: "2026-01-26",
+          });
+          rpcNotify("ui/notifications/initialized", {});
+        } catch (error) {
+          // Older ChatGPT hosts may expose window.openai without the
+          // standard MCP Apps bridge; the compatibility path above still works.
+          console.debug("MCP Apps bridge unavailable:", error);
+        }
+      }
+
+      initializeBridge();
+
+      // ChatGPT may update globals without remounting the iframe.
+      window.addEventListener(
+        "openai:set_globals",
+        () => render(fromChatGPTToolOutput() ?? fromWidgetState()),
+        { passive: true }
+      );
+    </script>
+  </body>
+</html>
